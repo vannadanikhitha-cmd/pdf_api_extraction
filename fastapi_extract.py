@@ -1,10 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import pdfplumber
-import pandas as pd
 import base64
 import tempfile
 import os
+import pandas as pd
+import pdfplumber
+import fitz
+
+from img2table.document import PDF
+import pytesseract
+import easyocr
 
 app = FastAPI()
 
@@ -16,6 +21,8 @@ class PDFRequest(BaseModel):
 @app.post("/extract_pdf_tables")
 async def extract_pdf_tables(request: PDFRequest):
 
+    temp_pdf_path = None
+
     try:
 
         # Decode Base64 PDF
@@ -23,7 +30,7 @@ async def extract_pdf_tables(request: PDFRequest):
             request.pdf_base64
         )
 
-        # Create temporary PDF
+        # Save PDF temporarily
         with tempfile.NamedTemporaryFile(
             delete=False,
             suffix=".pdf"
@@ -31,77 +38,183 @@ async def extract_pdf_tables(request: PDFRequest):
 
             temp_pdf.write(pdf_bytes)
 
-            pdf_path = temp_pdf.name
+            temp_pdf_path = temp_pdf.name
 
-        all_rows = []
+        final_tables = []
 
-        with pdfplumber.open(pdf_path) as pdf:
+        # -------------------------------------------------
+        # METHOD 1 : PDFPLUMBER
+        # -------------------------------------------------
 
-            for page in pdf.pages:
+        with pdfplumber.open(temp_pdf_path) as pdf:
 
-                words = page.extract_words()
+            for page_no, page in enumerate(pdf.pages):
 
-                table_started = False
+                tables = page.extract_tables()
 
-                current_row_y = None
+                for table in tables:
 
-                row_data = []
-
-                for word in words:
-
-                    text = word["text"]
-
-                    y = round(word["top"])
-
-                    # Detect table header
-                    if "TRAN" in text.upper():
-                        table_started = True
-
-                    if not table_started:
+                    if not table or len(table) < 2:
                         continue
 
-                    if current_row_y is None:
+                    try:
 
-                        current_row_y = y
+                        df = pd.DataFrame(
+                            table[1:],
+                            columns=table[0]
+                        )
 
-                    if abs(y - current_row_y) <= 3:
+                        final_tables.append(
+                            {
+                                "page": page_no + 1,
+                                "source": "pdfplumber",
+                                "rows": df.fillna("").to_dict(
+                                    orient="records"
+                                )
+                            }
+                        )
 
-                        row_data.append(text)
+                    except Exception:
+                        pass
 
-                    else:
+        # -------------------------------------------------
+        # METHOD 2 : IMG2TABLE + PADDLEOCR
+        # If pdfplumber found nothing
+        # -------------------------------------------------
 
-                        all_rows.append(row_data)
+        if len(final_tables) == 0:
 
-                        row_data = [text]
+            reader = easyocr.Reader(['en'])
 
-                        current_row_y = y
+            pdf_doc = PDF(
+                src=temp_pdf_path
+            )
 
-                if row_data:
+            extracted_tables = pdf_doc.extract_tables(
+                ocr=ocr,
+                implicit_rows=True,
+                implicit_columns=True,
+                borderless_tables=True
+            )
 
-                    all_rows.append(row_data)
+            for page_no, tables in extracted_tables.items():
 
-        # Remove temp PDF
-        os.remove(pdf_path)
+                for table in tables:
 
-        if not all_rows:
+                    try:
+
+                        df = table.df
+
+                        final_tables.append(
+                            {
+                                "page": page_no,
+                                "source": "img2table",
+                                "rows": df.fillna("").to_dict(
+                                    orient="records"
+                                )
+                            }
+                        )
+
+                    except Exception:
+                        pass
+
+        # -------------------------------------------------
+        # METHOD 3 : PYMUPDF + IMG2TABLE OCR
+        # Last fallback for image PDFs
+        # -------------------------------------------------
+
+        if len(final_tables) == 0:
+
+            pdf = fitz.open(
+                temp_pdf_path
+            )
+
+            image_paths = []
+
+            for page_no in range(len(pdf)):
+
+                page = pdf[page_no]
+
+                pix = page.get_pixmap(
+                    matrix=fitz.Matrix(
+                        3,
+                        3
+                    )
+                )
+
+                image_path = os.path.join(
+                    tempfile.gettempdir(),
+                    f"page_{page_no}.png"
+                )
+
+                pix.save(
+                    image_path
+                )
+
+                image_paths.append(
+                    image_path
+                )
+
+            ocr = PaddleOCR(
+                lang="en"
+            )
+
+            from img2table.document import Image
+
+            for page_no, image_path in enumerate(image_paths):
+
+                image_doc = Image(
+                    src=image_path
+                )
+
+                tables = image_doc.extract_tables(
+                    ocr=ocr,
+                    borderless_tables=True
+                )
+
+                for table in tables:
+
+                    try:
+
+                        df = table.df
+
+                        final_tables.append(
+                            {
+                                "page": page_no + 1,
+                                "source": "image_ocr",
+                                "rows": df.fillna("").to_dict(
+                                    orient="records"
+                                )
+                            }
+                        )
+
+                    except Exception:
+                        pass
+
+                if os.path.exists(
+                    image_path
+                ):
+                    os.remove(
+                        image_path
+                    )
+
+        # -------------------------------------------------
+        # NO TABLE FOUND
+        # -------------------------------------------------
+
+        if len(final_tables) == 0:
 
             raise HTTPException(
                 status_code=404,
-                detail="No table data found"
+                detail="No tables found in PDF"
             )
-
-        # Convert to DataFrame
-        df = pd.DataFrame(all_rows)
-
-        # Convert DataFrame to JSON
-        result = df.fillna("").to_dict(
-            orient="records"
-        )
 
         return {
             "status": "success",
-            "total_rows": len(result),
-            "data": result
+            "total_tables": len(
+                final_tables
+            ),
+            "tables": final_tables
         }
 
     except Exception as e:
@@ -110,3 +223,16 @@ async def extract_pdf_tables(request: PDFRequest):
             status_code=500,
             detail=str(e)
         )
+
+    finally:
+
+        if (
+            temp_pdf_path
+            and
+            os.path.exists(
+                temp_pdf_path
+            )
+        ):
+            os.remove(
+                temp_pdf_path
+            )
