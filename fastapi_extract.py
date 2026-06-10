@@ -18,89 +18,90 @@ async def extract_pdf_tables(request: PDFRequest):
 
     try:
 
+        # Decode Base64 PDF
         pdf_bytes = base64.b64decode(
             request.pdf_base64
         )
 
+        # Create temporary PDF
         with tempfile.NamedTemporaryFile(
             delete=False,
             suffix=".pdf"
         ) as temp_pdf:
 
             temp_pdf.write(pdf_bytes)
+
             pdf_path = temp_pdf.name
 
-        final_data = []
+        all_rows = []
 
         with pdfplumber.open(pdf_path) as pdf:
 
             for page in pdf.pages:
 
-                # Method 1
-                tables = page.extract_tables()
+                words = page.extract_words()
 
-                if tables:
+                table_started = False
 
-                    for table in tables:
+                current_row_y = None
 
-                        if len(table) > 1:
+                row_data = []
 
-                            df = pd.DataFrame(
-                                table[1:],
-                                columns=table[0]
-                            )
+                for word in words:
 
-                            final_data.extend(
-                                df.fillna("").to_dict(
-                                    orient="records"
-                                )
-                            )
+                    text = word["text"]
 
-                else:
+                    y = round(word["top"])
 
-                    # Method 2
-                    words = page.extract_words()
+                    # Detect table header
+                    if "TRAN" in text.upper():
+                        table_started = True
 
-                    if words:
+                    if not table_started:
+                        continue
 
-                        rows = {}
+                    if current_row_y is None:
 
-                        for word in words:
+                        current_row_y = y
 
-                            y = round(word["top"])
+                    if abs(y - current_row_y) <= 3:
 
-                            rows.setdefault(
-                                y,
-                                []
-                            ).append(
-                                word["text"]
-                            )
+                        row_data.append(text)
 
-                        for y in sorted(rows):
+                    else:
 
-                            row_text = " ".join(
-                                rows[y]
-                            )
+                        all_rows.append(row_data)
 
-                            final_data.append(
-                                {
-                                    "row_data": row_text
-                                }
-                            )
+                        row_data = [text]
 
+                        current_row_y = y
+
+                if row_data:
+
+                    all_rows.append(row_data)
+
+        # Remove temp PDF
         os.remove(pdf_path)
 
-        if not final_data:
+        if not all_rows:
 
             raise HTTPException(
                 status_code=404,
-                detail="No table/text found"
+                detail="No table data found"
             )
+
+        # Convert to DataFrame
+        df = pd.DataFrame(all_rows)
+
+        # Convert DataFrame to JSON
+        result = df.fillna("").to_dict(
+            orient="records"
+        )
 
         return {
             "status": "success",
-            "total_rows": len(final_data),
-            "data": final_data
+            "total_rows": len(result),
+            "data": result
         }
 
     except Exception as e:
