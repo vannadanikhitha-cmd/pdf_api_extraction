@@ -6,233 +6,232 @@ import os
 import pandas as pd
 import pdfplumber
 import fitz
-
-from img2table.document import PDF
-import pytesseract
 import easyocr
+import traceback
 
 app = FastAPI()
-
 
 class PDFRequest(BaseModel):
     pdf_base64: str
 
-
 @app.post("/extract_pdf_tables")
 async def extract_pdf_tables(request: PDFRequest):
 
-    temp_pdf_path = None
 
-    try:
+    pdf_path = None
+    image_paths = []
 
-        # Decode Base64 PDF
-        pdf_bytes = base64.b64decode(
-            request.pdf_base64
-        )
+try:
 
-        # Save PDF temporarily
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".pdf"
-        ) as temp_pdf:
+    # Decode Base64 PDF
+    pdf_bytes = base64.b64decode(
+        request.pdf_base64
+    )
 
-            temp_pdf.write(pdf_bytes)
+    # Save PDF temporarily
+    with tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=".pdf"
+    ) as temp_pdf:
 
-            temp_pdf_path = temp_pdf.name
+        temp_pdf.write(pdf_bytes)
+        temp_pdf_path = temp_pdf.name
 
-        final_tables = []
+    final_tables = []
 
-        # -------------------------------------------------
-        # METHOD 1 : PDFPLUMBER
-        # -------------------------------------------------
+    # =====================================
+    # METHOD 1 : PDFPLUMBER
+    # =====================================
 
-        with pdfplumber.open(temp_pdf_path) as pdf:
+    with pdfplumber.open(temp_pdf_path) as pdf:
 
-            for page_no, page in enumerate(pdf.pages):
+        for page_no, page in enumerate(pdf.pages):
 
-                tables = page.extract_tables()
+            table_settings = {
+                "vertical_strategy": "text",
+                "horizontal_strategy": "text",
+                "snap_tolerance": 3,
+                "join_tolerance": 3,
+                "edge_min_length": 3,
+                "intersection_tolerance": 3
+            }
 
-                for table in tables:
+            tables = page.extract_tables(
+                table_settings=table_settings
+            )
 
-                    if not table or len(table) < 2:
+            for table in tables:
+
+                if not table:
+                    continue
+
+                try:
+
+                    cleaned_table = []
+
+                    for row in table:
+
+                        if row and any(
+                            cell is not None and str(cell).strip()
+                            for cell in row
+                        ):
+                            cleaned_table.append(row)
+
+                    if len(cleaned_table) < 2:
                         continue
 
-                    try:
+                    headers = []
 
-                        df = pd.DataFrame(
-                            table[1:],
-                            columns=table[0]
-                        )
+                    for i, col in enumerate(cleaned_table[0]):
 
-                        final_tables.append(
-                            {
-                                "page": page_no + 1,
-                                "source": "pdfplumber",
-                                "rows": df.fillna("").to_dict(
-                                    orient="records"
-                                )
-                            }
-                        )
+                        if col and str(col).strip():
 
-                    except Exception:
-                        pass
+                            headers.append(
+                                str(col).strip()
+                            )
 
-        # -------------------------------------------------
-        # METHOD 2 : IMG2TABLE + PADDLEOCR
-        # If pdfplumber found nothing
-        # -------------------------------------------------
+                        else:
 
-        if len(final_tables) == 0:
+                            headers.append(
+                                f"Column_{i+1}"
+                            )
 
-            reader = easyocr.Reader(['en'])
-
-            pdf_doc = PDF(
-                src=temp_pdf_path
-            )
-
-            extracted_tables = pdf_doc.extract_tables(
-                ocr=ocr,
-                implicit_rows=True,
-                implicit_columns=True,
-                borderless_tables=True
-            )
-
-            for page_no, tables in extracted_tables.items():
-
-                for table in tables:
-
-                    try:
-
-                        df = table.df
-
-                        final_tables.append(
-                            {
-                                "page": page_no,
-                                "source": "img2table",
-                                "rows": df.fillna("").to_dict(
-                                    orient="records"
-                                )
-                            }
-                        )
-
-                    except Exception:
-                        pass
-
-        # -------------------------------------------------
-        # METHOD 3 : PYMUPDF + IMG2TABLE OCR
-        # Last fallback for image PDFs
-        # -------------------------------------------------
-
-        if len(final_tables) == 0:
-
-            pdf = fitz.open(
-                temp_pdf_path
-            )
-
-            image_paths = []
-
-            for page_no in range(len(pdf)):
-
-                page = pdf[page_no]
-
-                pix = page.get_pixmap(
-                    matrix=fitz.Matrix(
-                        3,
-                        3
-                    )
-                )
-
-                image_path = os.path.join(
-                    tempfile.gettempdir(),
-                    f"page_{page_no}.png"
-                )
-
-                pix.save(
-                    image_path
-                )
-
-                image_paths.append(
-                    image_path
-                )
-
-            ocr = PaddleOCR(
-                lang="en"
-            )
-
-            from img2table.document import Image
-
-            for page_no, image_path in enumerate(image_paths):
-
-                image_doc = Image(
-                    src=image_path
-                )
-
-                tables = image_doc.extract_tables(
-                    ocr=ocr,
-                    borderless_tables=True
-                )
-
-                for table in tables:
-
-                    try:
-
-                        df = table.df
-
-                        final_tables.append(
-                            {
-                                "page": page_no + 1,
-                                "source": "image_ocr",
-                                "rows": df.fillna("").to_dict(
-                                    orient="records"
-                                )
-                            }
-                        )
-
-                    except Exception:
-                        pass
-
-                if os.path.exists(
-                    image_path
-                ):
-                    os.remove(
-                        image_path
+                    df = pd.DataFrame(
+                        cleaned_table[1:],
+                        columns=headers
                     )
 
-        # -------------------------------------------------
-        # NO TABLE FOUND
-        # -------------------------------------------------
+                    df = df.fillna("")
 
-        if len(final_tables) == 0:
+                    final_tables.append(
+                        {
+                            "page": page_no + 1,
+                            "source": "pdfplumber",
+                            "rows": df.to_dict(
+                                orient="records"
+                            )
+                        }
+                    )
 
-            raise HTTPException(
-                status_code=404,
-                detail="No tables found in PDF"
+                except Exception as table_error:
+
+                    print(
+                        f"Table Error: {table_error}"
+                    )
+
+    # =====================================
+    # METHOD 2 : OCR FALLBACK
+    # =====================================
+
+    if len(final_tables) == 0:
+
+        reader = easyocr.Reader(
+            ['en'],
+            gpu=False
+        )
+
+        pdf = fitz.open(
+            temp_pdf_path
+        )
+
+        for page_no in range(len(pdf)):
+
+            page = pdf[page_no]
+
+            pix = page.get_pixmap(
+                matrix=fitz.Matrix(3, 3)
             )
+
+            image_path = os.path.join(
+                tempfile.gettempdir(),
+                f"page_{page_no}.png"
+            )
+
+            pix.save(image_path)
+
+            image_paths.append(
+                image_path
+            )
+
+            try:
+
+                results = reader.readtext(
+                    image_path,
+                    detail=0
+                )
+
+                rows = []
+
+                for line in results:
+
+                    line = line.strip()
+
+                    if line:
+
+                        rows.append(
+                            {
+                                "text": line
+                            }
+                        )
+
+                if rows:
+
+                    final_tables.append(
+                        {
+                            "page": page_no + 1,
+                            "source": "easyocr",
+                            "rows": rows
+                        }
+                    )
+
+            except Exception:
+                pass
+
+    # =====================================
+    # NO TABLE FOUND
+    # =====================================
+
+    if len(final_tables) == 0:
+
+        raise HTTPException(
+            status_code=404,
+            detail="No tables found in PDF"
+        )
 
         return {
             "status": "success",
-            "total_tables": len(
-                final_tables
-            ),
+            "total_tables": len(final_tables),
             "tables": final_tables
-        }
+         }
 
-    except Exception as e:
+except Exception as e:
 
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+    traceback.print_exc()
 
-    finally:
+    raise HTTPException(
+        status_code=500,
+        detail=str(e)
+    )
+
+finally:
+
+    try:
 
         if (
             temp_pdf_path
             and
-            os.path.exists(
-                temp_pdf_path
-            )
+            os.path.exists(temp_pdf_path)
         ):
-            os.remove(
-                temp_pdf_path
-            )
+            os.remove(temp_pdf_path)
+
+        for image_path in image_paths:
+
+            if os.path.exists(image_path):
+                os.remove(image_path)
+
+    except Exception as cleanup_error:
+
+        print(
+            f"Cleanup Error: {cleanup_error}"
+        )
+
