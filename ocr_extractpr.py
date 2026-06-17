@@ -1,25 +1,24 @@
 import os
 import json
+import numpy as np
 import pandas as pd
+
 from pdf2image import convert_from_path
 from paddleocr import PaddleOCR
-import numpy as np
 
 # ==========================================
 # CONFIG
 # ==========================================
 
-PDF_PATH = r"C:\Users\Hello\Downloads\hdfc.pdf"
-
-POPPLER_PATH = r"c:\poppler\Library\bin\poppler-26.02.0\Library\bin"
-# Example:
-# POPPLER_PATH = r"C:\poppler\Library\bin"
+PDF_PATH = r"C:\Users\Hello\Downloads\Axis 925020016590441 pdf.PDF"
+POPPLER_PATH = r"C:\poppler\Library\bin\poppler-26.02.0\Library\bin"
 
 # ==========================================
 # OCR INITIALIZATION
 # ==========================================
 
 ocr = PaddleOCR(
+    use_angle_cls=True,
     lang="en"
 )
 
@@ -30,7 +29,6 @@ ocr = PaddleOCR(
 def extract_page_words(image):
 
     image_np = np.array(image)
-    print(type(image_np))
 
     result = ocr.ocr(image_np, cls=True)
 
@@ -40,18 +38,13 @@ def extract_page_words(image):
         print("No OCR text detected")
         return words
 
-    if len(result) == 0:
-        return words
-
     if result[0] is None:
         return words
 
     for line in result[0]:
 
         box = line[0]
-
         text = line[1][0]
-
         score = line[1][1]
 
         x1 = int(box[0][0])
@@ -109,9 +102,8 @@ def group_rows(words, y_threshold=15):
 
     return rows
 
-
 # ==========================================
-# CONVERT ROWS TO TABLE
+# ROWS TO TABLE
 # ==========================================
 
 def rows_to_table(rows):
@@ -125,15 +117,38 @@ def rows_to_table(rows):
             key=lambda x: x["x1"]
         )
 
-        texts = [
-            item["text"]
-            for item in row
-        ]
-
-        table.append(texts)
+        table.append(
+            [item["text"] for item in row]
+        )
 
     return table
+# ==========================================
+# TABLE TO JSON
+# ==========================================
 
+def table_to_json(rows):
+
+    if not rows:
+        return []
+
+    headers = rows[0]
+
+    transactions = []
+
+    for row in rows[1:]:
+
+        record = {}
+
+        for i in range(len(headers)):
+
+            if i < len(row):
+                record[headers[i]] = row[i]
+            else:
+                record[headers[i]] = ""
+
+        transactions.append(record)
+
+    return transactions
 
 # ==========================================
 # PDF PROCESSING
@@ -141,19 +156,10 @@ def rows_to_table(rows):
 
 def process_pdf(pdf_path):
 
-    if POPPLER_PATH:
-
-        pages = convert_from_path(
-            pdf_path,
-            poppler_path=POPPLER_PATH
-        )
-
-    else:
-
-        pages = convert_from_path(
-            pdf_path,
-            poppler_path=POPPLER_PATH
-        )
+    pages = convert_from_path(
+        pdf_path,
+        poppler_path=POPPLER_PATH
+    )
 
     all_rows = []
 
@@ -171,39 +177,30 @@ def process_pdf(pdf_path):
 
     return all_rows
 
-
 # ==========================================
 # SAVE JSON
 # ==========================================
 
 def save_json(data):
 
-    output = []
-
-    for row in data:
-
-        output.append({
-            "row_data": row
-        })
-
     os.makedirs("output", exist_ok=True)
 
     with open(
-        "output/extracted_data.json",
+        "output/transactions.json",
         "w",
         encoding="utf-8"
     ) as f:
 
         json.dump(
-            output,
+            data,
             f,
             indent=4,
             ensure_ascii=False
         )
 
-    print("\nSaved : output/extracted_data.json")
-
-
+    print(
+        "\nSaved : output/transactions.json"
+    )
 # ==========================================
 # MAIN
 # ==========================================
@@ -212,8 +209,14 @@ if __name__ == "__main__":
 
     extracted_rows = process_pdf(PDF_PATH)
 
-    save_json(extracted_rows)
+    transactions = table_to_json(extracted_rows)
 
-    df = pd.DataFrame(extracted_rows)
+    save_json(transactions)
 
-    print(df.head())
+    print(
+        json.dumps(
+            transactions[:5],
+            indent=4,
+            ensure_ascii=False
+        )
+    )
