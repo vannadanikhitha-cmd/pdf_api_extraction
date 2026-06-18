@@ -32,7 +32,7 @@ with pdfplumber.open(r"C:\Users\Hello\Downloads\hdfc.pdf") as pdf:
         table_top = table_obj.bbox[1]
         table_bottom = table_obj.bbox[3]
 
-        raw_table_data = table_obj.page.extract_table()
+        raw_table_data = table_obj.extract()
 
         if raw_table_data and page_num == 1:
             global_headers = [
@@ -65,16 +65,16 @@ with pdfplumber.open(r"C:\Users\Hello\Downloads\hdfc.pdf") as pdf:
 
         words = page.extract_words()
 
-        tolerance = 3
+        tolerance = 5
         lines = []
         
         # --- FIX 1: Lower the threshold from 15 to 5 to catch rows printed tightly against the header ---
-        header_height_threshold = table_top + 5
+        header_height_threshold = table_top
 
         for word in words:
             if word["top"] > table_bottom:
                 continue
-            if word["top"] <= header_height_threshold:
+            if word["top"] < header_height_threshold:
                 continue
             if (
                 word["x0"] < table_obj.bbox[0]
@@ -92,7 +92,12 @@ with pdfplumber.open(r"C:\Users\Hello\Downloads\hdfc.pdf") as pdf:
                 lines.append({"top": word["top"], "words": [word]})
 
         lines.sort(key=lambda x: x["top"])
-
+        print(f"\nPAGE {page_num}") 
+        for line in lines[:5]: 
+            print( 
+                line["top"], 
+                " ".join(w["text"] for w in line["words"]) 
+            )
         # Dynamically identify which column is the Date column and which is Description
         date_col_name = global_columns[0]["name"]
         desc_col_name = None
@@ -129,11 +134,20 @@ with pdfplumber.open(r"C:\Users\Hello\Downloads\hdfc.pdf") as pdf:
                 continue
 
             # Skip header rows repeating across pages
-            if "date" in line_data.get(date_col_name, "").lower():
-                continue
+            row_text = " ".join(line_data.values()).lower()
 
+            if (
+                "date" in row_text
+                and (
+                    "description" in row_text
+                    or "narration" in row_text
+                    or "particulars" in row_text
+                )
+            ):
+                continue
             # Core Logic: Use RegEx to verify if the text in the date column is actually a valid date string
-            has_valid_date = is_valid_date(line_data.get(date_col_name))
+            date_text = line_data.get(date_col_name, "").replace(" ", "")
+            has_valid_date = is_valid_date(date_text)
 
             if has_valid_date:
                 # Start a clean new transaction record
