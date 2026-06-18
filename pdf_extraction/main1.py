@@ -1,23 +1,36 @@
 import json
 import re
 import pdfplumber
-
+#from datetime import datetime
 all_rows = []
 
 
 def is_valid_date(text):
-    """Generically checks if a string contains a date pattern.
 
-    Matches formats like: DD/MM/YY, DD/MM/YYYY, DD-MM-YYYY, etc.
-    """
     if not text:
         return False
-    # Regular expression for matching common date formats found in statements
-    date_pattern = r"\b\d{1,2}[/\.-]\d{1,2}[/\.-]\d{2,4}\b"
-    return bool(re.search(date_pattern, text))
+
+    patterns = [
+
+        r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+
+        r"\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b",
+
+        r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b",
+
+        r"\b[A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}\b"
+    ]
+
+    for pattern in patterns:
+
+        if re.search(pattern, text):
+
+            return True
+
+    return False
 
 
-with pdfplumber.open(r"C:\Users\Hello\Downloads\hdfc.pdf") as pdf:
+with pdfplumber.open(r"C:\Users\Hello\Downloads\Axis 925020016590441 pdf.PDF") as pdf:
     global_headers = []
     global_columns = []
     current_row = None
@@ -25,40 +38,50 @@ with pdfplumber.open(r"C:\Users\Hello\Downloads\hdfc.pdf") as pdf:
     for page_num, page in enumerate(pdf.pages, start=1):
         detected_tables = page.find_tables()
 
+        print(f"\nPAGE {page_num}")
+        print(f"TOTAL TABLES FOUND: {len(detected_tables)}")
+
         if not detected_tables:
             continue
 
-        table_obj = detected_tables[0]
-        table_top = table_obj.bbox[1]
-        table_bottom = table_obj.bbox[3]
+        for table_obj in detected_tables:
 
-        raw_table_data = table_obj.extract()
+            table_top = table_obj.bbox[1]
+            table_bottom = table_obj.bbox[3]
 
-        if raw_table_data and page_num == 1:
-            global_headers = [
-                str(cell).strip().replace("\n", " ")
-                for cell in raw_table_data[0]
-            ]
+            raw_table_data = table_obj.extract()
+            if raw_table_data and page_num == 1:
 
-            x_coordinates = sorted(
-                list(
-                    set(
-                        [cell[0] for cell in table_obj.cells]
-                        + [cell[2] for cell in table_obj.cells]
+                global_headers = [
+                    str(cell).strip().replace("\n", " ")
+                    for cell in raw_table_data[0]
+                ]
+
+                print("\nDETECTED HEADERS:")
+                print(global_headers)
+
+                x_coordinates = sorted(
+                    list(
+                        set(
+                            [cell[0] for cell in table_obj.cells]
+                            + [cell[2] for cell in table_obj.cells]
+                        )
                     )
                 )
-            )
 
-            global_columns = []
-            for i in range(len(x_coordinates) - 1):
-                if i < len(global_headers):
-                    global_columns.append(
-                        {
-                            "name": global_headers[i],
-                            "x0": x_coordinates[i],
-                            "x1": x_coordinates[i + 1],
-                        }
-                    )
+    global_columns = []
+
+    for i in range(len(x_coordinates) - 1):
+
+        if i < len(global_headers):
+
+            global_columns.append(
+                {
+                    "name": global_headers[i],
+                    "x0": x_coordinates[i],
+                    "x1": x_coordinates[i + 1],
+                }
+            )
 
         if not global_columns:
             continue
@@ -115,7 +138,9 @@ with pdfplumber.open(r"C:\Users\Hello\Downloads\hdfc.pdf") as pdf:
 
         if not desc_col_name and len(global_columns) > 1:
             desc_col_name = global_columns[1]["name"]
-
+        print("\nCOLUMN DETECTION")
+        print("DATE COLUMN:", date_col_name)
+        print("DESCRIPTION COLUMN:", desc_col_name)
         for line in lines:
             line_data = {col["name"]: "" for col in global_columns}
             line["words"].sort(key=lambda x: x["x0"])
@@ -147,7 +172,15 @@ with pdfplumber.open(r"C:\Users\Hello\Downloads\hdfc.pdf") as pdf:
                 continue
             # Core Logic: Use RegEx to verify if the text in the date column is actually a valid date string
             date_text = line_data.get(date_col_name, "").replace(" ", "")
+
+            print("\nROW DATA:")
+            print(line_data)
+
+            print("DATE TEXT:", date_text)
+
             has_valid_date = is_valid_date(date_text)
+
+            print("VALID DATE:", has_valid_date)
 
             if has_valid_date:
                 # Start a clean new transaction record
@@ -158,6 +191,8 @@ with pdfplumber.open(r"C:\Users\Hello\Downloads\hdfc.pdf") as pdf:
                             "",
                             current_row[desc_col_name],
                         ).strip()
+                    print("ADDING ROW TO JSON")
+                    print(current_row)
                     all_rows.append(current_row)
                 current_row = line_data
             else:
@@ -171,6 +206,8 @@ with pdfplumber.open(r"C:\Users\Hello\Downloads\hdfc.pdf") as pdf:
                             break
 
                     if is_pure_description_continuation:
+                        print("CONTINUATION ROW DETECTED")
+                        print(line_data)
                         if line_data.get(desc_col_name):
                             current_row[desc_col_name] = (
                                 current_row[desc_col_name]
@@ -189,7 +226,8 @@ with pdfplumber.open(r"C:\Users\Hello\Downloads\hdfc.pdf") as pdf:
                                     "",
                                     current_row[desc_col_name],
                                 ).strip()
-
+                            print("ADDING ROW TO JSON")
+                            print(current_row)
                             all_rows.append(current_row)
                             current_row = None
 
@@ -198,12 +236,26 @@ with pdfplumber.open(r"C:\Users\Hello\Downloads\hdfc.pdf") as pdf:
             current_row[desc_col_name] = re.sub(
                 r"\s+[A-Z_]{5,}\s*[:-]*\s*$", "", current_row[desc_col_name]
             ).strip()
+        print("ADDING ROW TO JSON")
+        print(current_row)
         all_rows.append(current_row)
 
 # Save result
-output_file = "hdfc1.json"
+output_file = "axis.json"
 with open(output_file, "w", encoding="utf-8") as f:
     json.dump(all_rows, f, indent=4, ensure_ascii=False)
 
+print("\nFINAL JSON ROWS")
+print(len(all_rows))
+
+for i, row in enumerate(all_rows[:10]):
+    print(f"ROW {i+1}")
+    print(row)
+print("\nFINAL JSON ROWS")
+print(len(all_rows))
+
+for i, row in enumerate(all_rows[:10]):
+    print(f"ROW {i+1}")
+    print(row)
 print(f"Generic Processing Complete! Total rows saved: {len(all_rows)}")
 print(f"Total number of JSON rows extracted: {len(all_rows)}")
